@@ -5,6 +5,7 @@ from rich.table import Table
 
 from database import init_db, get_session
 from importer import import_contacts_from_csv
+from llm import get_llm_client, LLMError
 
 app = typer.Typer(
     name="intern-outreach",
@@ -65,6 +66,36 @@ def import_contacts(
             console.print(f"  • Row {row_num} [bold]{identifier}[/bold]: {reason}")
 
     console.print("\n[bold green]Import finished successfully.[/bold green]")
+
+
+@app.command("test-llm")
+def test_llm(
+    prompt: str = typer.Argument(
+        "say hello",
+        help="The test prompt to send to the configured LLM provider."
+    )
+):
+    """
+    Test the connection and generation capabilities of the configured LLM provider.
+    """
+    console.print(f"[bold blue]Initializing LLM provider...[/bold blue]")
+    try:
+        client = get_llm_client()
+        provider_name = client.__class__.__name__
+        console.print(f"[cyan]Provider:[/cyan] {provider_name}")
+        console.print(f"[cyan]Prompt:[/cyan] [italic]\"{prompt}\"[/italic]")
+        console.print("[dim]Waiting for LLM response...[/dim]")
+
+        response = client.generate(prompt)
+
+        console.print("\n[bold green]✓ LLM Response Received:[/bold green]")
+        console.print(f"[white]{response}[/white]\n")
+    except LLMError as e:
+        console.print(f"\n[bold red]LLM Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,16 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 4
     LLM_BACKOFF_FACTOR: float = 2.0
 
-    # Gmail OAuth Settings
+    # Email Sending Mode: "smtp" (easiest via Gmail App Password) or "oauth" (Gmail API credentials.json)
+    EMAIL_SEND_METHOD: str = "smtp"
+
+    # Gmail SMTP Settings (App Password method)
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 465
+    SENDER_EMAIL: Optional[str] = None
+    SENDER_APP_PASSWORD: Optional[str] = None
+
+    # Gmail OAuth Settings (Google Cloud method)
     GMAIL_CLIENT_SECRET_FILE: str = "credentials.json"
     GMAIL_TOKEN_FILE: str = "token.json"
 

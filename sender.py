@@ -1,6 +1,7 @@
 import base64
 import os
 import random
+import smtplib
 import time
 import logging
 from datetime import datetime, date
@@ -19,8 +20,8 @@ logger = logging.getLogger(__name__)
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 
 
-class GmailSendError(Exception):
-    """Exception raised when Gmail API send operation fails."""
+class EmailSendError(Exception):
+    """Exception raised when email transmission fails."""
     pass
 
 
@@ -50,13 +51,39 @@ def get_calendar_day_send_count(session: Session, target_date: Optional[date] = 
     return count or 0
 
 
-def build_email_message(to_email: str, subject: str, body: str) -> EmailMessage:
+def build_email_message(to_email: str, subject: str, body: str, from_email: Optional[str] = None) -> EmailMessage:
     """Creates a standard MIME email message."""
     message = EmailMessage()
     message["To"] = to_email
+    sender = from_email or settings.SENDER_EMAIL or "me"
+    message["From"] = sender
     message["Subject"] = subject
     message.set_content(body)
     return message
+
+
+def execute_smtp_send(to_email: str, subject: str, body: str) -> None:
+    """
+    Sends an email using standard Gmail SSL SMTP and 16-character App Password.
+    Zero Google Cloud setup required.
+    """
+    if not settings.SENDER_EMAIL or not settings.SENDER_APP_PASSWORD:
+        raise EmailSendError(
+            "SENDER_EMAIL and SENDER_APP_PASSWORD must be configured in .env to use SMTP sending. "
+            "Get an App Password at: https://myaccount.google.com/apppasswords"
+        )
+
+    msg = build_email_message(to_email, subject, body, from_email=settings.SENDER_EMAIL)
+
+    try:
+        # Use SSL on port 465
+        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30) as server:
+            # Strip any spaces from the 16-char app password if user pasted with spaces
+            cleaned_password = settings.SENDER_APP_PASSWORD.replace(" ", "").strip()
+            server.login(settings.SENDER_EMAIL.strip(), cleaned_password)
+            server.send_message(msg)
+    except Exception as e:
+        raise EmailSendError(f"SMTP transmission failed to {to_email}: {e}") from e
 
 
 def get_gmail_service(
@@ -82,21 +109,20 @@ def get_gmail_service(
             if not credentials_path.exists():
                 raise FileNotFoundError(
                     f"Gmail OAuth client credentials file '{credentials_path}' not found. "
-                    "Follow the setup instructions in README.md to download credentials.json."
+                    "Either use EMAIL_SEND_METHOD=smtp in .env (recommended) or follow Google Cloud OAuth setup in README.md."
                 )
             flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), GMAIL_SCOPES)
             creds = flow.run_local_server(port=0)
 
-        # Save credentials for next run
         with open(token_path, "w", encoding="utf-8") as token_file:
             token_file.write(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)
 
 
-def execute_gmail_send(service, to_email: str, subject: str, body: str) -> str:
+def execute_gmail_oauth_send(service, to_email: str, subject: str, body: str) -> str:
     """
-    Sends an email using the Gmail API service.
+    Sends an email using the Gmail REST API service.
     Returns the sent message ID.
     """
     try:
@@ -106,7 +132,18 @@ def execute_gmail_send(service, to_email: str, subject: str, body: str) -> str:
         sent = service.users().messages().send(userId="me", body=send_body).execute()
         return sent.get("id", "unknown_id")
     except Exception as e:
-        raise GmailSendError(f"Gmail API transmission failed: {e}") from e
+        raise EmailSendError(f"Gmail OAuth transmission failed: {e}") from e
+
+
+def dispatch_email(to_email: str, subject: str, body: str, gmail_service=None) -> None:
+    """Dispatches email via either SMTP (App Password) or OAuth depending on config."""
+    method = settings.EMAIL_SEND_METHOD.strip().lower()
+    if method == "smtp":
+        execute_smtp_send(to_email, subject, body)
+    elif method == "oauth":
+        execute_gmail_oauth_send(gmail_service, to_email, subject, body)
+    else:
+        raise EmailSendError(f"Unsupported EMAIL_SEND_METHOD: '{settings.EMAIL_SEND_METHOD}'")
 
 
 def process_sending_batch(
@@ -121,7 +158,7 @@ def process_sending_batch(
     - Verifies status is ContactStatus.APPROVED
     - Respects daily cap (settings.DAILY_EMAIL_CAP) counted from DB
     - In dry_run mode, prints email without sending
-    - In live mode, performs real send via Gmail API
+    - In live mode, performs real send via chosen method (SMTP or OAuth)
     - Waits random delay (settings.DELAY_MIN_SECONDS to settings.DELAY_MAX_SECONDS) between live sends
     - Aborts immediately on any API error
     - Logs timestamp and sets status = 'sent' on success
@@ -150,13 +187,13 @@ def process_sending_batch(
         body = contact.draft_body or ""
 
         if dry_run:
-            # DRY RUN MODE: Do not touch Gmail API, do not mark as sent
+            # DRY RUN MODE: Do not touch mail servers, do not mark as sent
             sent_in_batch += 1
             logger.info(f"[DRY RUN] Would send to {contact.email} ({contact.name})")
         else:
             # LIVE SEND MODE
             try:
-                execute_gmail_send(gmail_service, contact.email, subject, body)
+                dispatch_email(contact.email, subject, body, gmail_service=gmail_service)
                 contact.sent_at = datetime.now()
                 contact.status = ContactStatus.SENT
                 session.commit()

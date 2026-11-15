@@ -319,13 +319,16 @@ def send(
 
         # LIVE SENDING
         console.print(f"\n[bold red]⚠️  LIVE SENDING MODE ACTIVATED ⚠️[/bold red]")
-        console.print(f"Preparing to send up to {len(approved_contacts)} approved emails via Gmail API...\n")
+        console.print(f"[cyan]Method:[/cyan] {settings.EMAIL_SEND_METHOD.upper()}")
+        console.print(f"Preparing to send up to {len(approved_contacts)} approved emails...\n")
 
-        try:
-            gmail_service = get_gmail_service()
-        except Exception as e:
-            console.print(f"[bold red]Failed to initialize Gmail API service:[/bold red] {e}")
-            raise typer.Exit(code=1)
+        gmail_service = None
+        if settings.EMAIL_SEND_METHOD.lower() == "oauth":
+            try:
+                gmail_service = get_gmail_service()
+            except Exception as e:
+                console.print(f"[bold red]Failed to initialize Gmail API service:[/bold red] {e}")
+                raise typer.Exit(code=1)
 
         sent_count, skipped_cap, err_message = process_sending_batch(
             session=session,

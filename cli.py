@@ -10,6 +10,7 @@ from models import Contact, ContactStatus
 from importer import import_contacts_from_csv
 from llm import get_llm_client, LLMError
 from drafter import load_profile, build_draft_prompt, parse_and_validate_draft, PROFILE_PATH
+from reviewer import review_loop
 
 app = typer.Typer(
     name="intern-outreach",
@@ -156,7 +157,6 @@ def generate_drafts(
             success = False
             last_err = ""
 
-            # Attempt initial generation + 1 retry
             for attempt in range(1, 3):
                 try:
                     current_prompt = prompt
@@ -193,7 +193,6 @@ def generate_drafts(
 
         session.commit()
 
-    # Final summary table
     table = Table(title="Draft Generation Summary")
     table.add_column("Result", style="cyan")
     table.add_column("Count", style="bold")
@@ -201,6 +200,43 @@ def generate_drafts(
     table.add_row("Drafted (Ready for Review)", f"[green]{drafted_count}[/green]")
     table.add_row("Draft Failed", f"[red]{failed_count}[/red]")
     console.print("\n", table)
+
+
+@app.command("review")
+def review(
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Maximum number of 'drafted' emails to review in this session."
+    )
+):
+    """
+    Interactively review drafted cold emails one by one.
+    Keys:
+      a = approve
+      e = edit
+      s = skip
+      d = mark do_not_contact
+      q = quit and save progress
+    """
+    with get_session() as session:
+        query = (
+            session.query(Contact)
+            .filter(Contact.status == ContactStatus.DRAFTED)
+            .order_by(Contact.id)
+        )
+        if limit is not None and limit > 0:
+            query = query.limit(limit)
+
+        contacts = query.all()
+
+        if not contacts:
+            console.print("[yellow]No contacts found with status 'drafted'. Nothing to review.[/yellow]")
+            return
+
+        console.print(f"[bold blue]Starting review for {len(contacts)} drafted emails...[/bold blue]")
+        review_loop(session, contacts)
 
 
 @app.command("export-drafts")
@@ -218,7 +254,7 @@ def export_drafts(
     )
 ):
     """
-    Export all drafted contacts to drafts_review.csv for manual inspection and approval.
+    Export all drafted contacts to drafts_review.csv for manual inspection.
     """
     with get_session() as session:
         contacts = (

@@ -6,7 +6,7 @@ A personal, approval-gated CLI tool that drafts personalized internship cold out
 
 ## Global Rules & Safety Architecture
 - **Dry-run by default**: No real emails will ever be sent unless dry-run mode is explicitly disabled.
-- **Approval-gated**: Emails transition through `drafted` -> `approved` -> `sent`. Nothing is sent without review.
+- **Strict Approval Gate**: **ONLY** contacts with status `approved` can ever be sent. All other statuses (`new`, `drafted`, `draft_failed`, `sent`, `do_not_contact`, `bounced`) are strictly excluded.
 - **Secret security**: API keys and OAuth tokens are strictly loaded from `.env` and local credential files which are ignored in `.gitignore`. Secrets are never printed or logged.
 - **Throttling & Pacing**: Conservative daily sending caps (30 emails/day), 5-second pacing between LLM calls, and randomized delays (60–180 seconds).
 - **Validation Guardrails**: Output must strictly adhere to `SUBJECT:` and `BODY:` formats, be strictly under 130 words, and contain zero hyperlinks/URLs.
@@ -23,6 +23,7 @@ A personal, approval-gated CLI tool that drafts personalized internship cold out
 ├── importer.py           # CSV contact import & validation logic
 ├── llm.py                # LLM client abstractions (GeminiClient, OllamaClient)
 ├── drafter.py            # Draft prompt templating, parser & validator (<130 words, no links)
+├── reviewer.py           # Interactive terminal review loop & approval gatekeeper
 ├── cli.py                # Typer CLI application entry point
 ├── profile.yaml          # User profile configuration (name, degree, skills, projects, goal)
 ├── contacts.csv          # Sample CSV template with mock contacts
@@ -33,7 +34,8 @@ A personal, approval-gated CLI tool that drafts personalized internship cold out
 │   ├── __init__.py
 │   ├── test_contacts.py  # Tests for email validation and duplicate handling
 │   ├── test_llm.py       # Mocked tests for LLM client, retries, and pacing
-│   └── test_drafts.py    # Tests for draft generation, validation, and retry logic
+│   ├── test_drafts.py    # Tests for draft generation, validation, and retry logic
+│   └── test_review.py    # Tests for interactive review actions and sending safety gate
 └── README.md             # Documentation and testing instructions
 ```
 
@@ -110,20 +112,30 @@ python cli.py generate-drafts
 # Or limit to N contacts (e.g., test with 1 or 2 first)
 python cli.py generate-drafts --limit 2
 ```
-*Note: Drafts are validated to ensure they contain `SUBJECT:` and `BODY:`, are under 130 words, and contain no links. If an attempt fails validation, it retries once with feedback. If both fail, it is marked as `draft_failed`.*
 
-### 4. Export Drafts for Review
-Export all drafted emails to CSV for manual approval:
+### 4. Interactive Review
+Interactively review, edit, approve, or reject drafts in the terminal:
+```bash
+python cli.py review
+```
+Keybindings in review mode:
+- `a`: **Approve** (marks status as `approved` — the only state eligible for sending).
+- `e`: **Edit** (opens draft in `$EDITOR` or interactive text prompts, then re-displays for approval).
+- `s`: **Skip** (leaves as `drafted` to decide later).
+- `d`: **Do Not Contact** (marks status as `do_not_contact`).
+- `q`: **Quit & Save** (commits all progress and exits).
+
+### 5. Export Drafts for Review
+Export all drafted emails to CSV for external inspection:
 ```bash
 python cli.py export-drafts
 ```
-*Creates `drafts_review.csv`.*
 
 ---
 
 ## Running Tests
 
-Run the complete unit test suite (all LLM external calls are mocked):
+Run the complete test suite (27 unit and safety tests):
 ```bash
 pytest -v
 ```

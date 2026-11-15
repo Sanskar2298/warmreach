@@ -1,11 +1,15 @@
+import csv
 from pathlib import Path
+from typing import Optional
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from database import init_db, get_session
+from models import Contact, ContactStatus
 from importer import import_contacts_from_csv
 from llm import get_llm_client, LLMError
+from drafter import load_profile, build_draft_prompt, parse_and_validate_draft, PROFILE_PATH
 
 app = typer.Typer(
     name="intern-outreach",
@@ -96,6 +100,169 @@ def test_llm(
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}")
         raise typer.Exit(code=1)
+
+
+@app.command("generate-drafts")
+def generate_drafts(
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Maximum number of 'new' contacts to process for draft generation."
+    ),
+    profile_file: Path = typer.Option(
+        PROFILE_PATH,
+        "--profile",
+        "-p",
+        help="Path to the applicant profile YAML file."
+    )
+):
+    """
+    Generate personalized email drafts for contacts with status 'new'.
+    Validates output structure, word count (<130), and absence of links.
+    Retries once on validation failure before marking as 'draft_failed'.
+    """
+    try:
+        profile = load_profile(profile_file)
+    except Exception as e:
+        console.print(f"[bold red]Failed to load profile:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    try:
+        llm = get_llm_client()
+    except Exception as e:
+        console.print(f"[bold red]Failed to initialize LLM client:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    with get_session() as session:
+        query = session.query(Contact).filter(Contact.status == ContactStatus.NEW).order_by(Contact.id)
+        if limit is not None and limit > 0:
+            query = query.limit(limit)
+        contacts = query.all()
+
+        if not contacts:
+            console.print("[yellow]No contacts found with status 'new'. Nothing to draft.[/yellow]")
+            return
+
+        console.print(f"[bold blue]Found {len(contacts)} contacts ready for drafting.[/bold blue]\n")
+
+        drafted_count = 0
+        failed_count = 0
+
+        for idx, contact in enumerate(contacts, start=1):
+            console.print(f"[cyan]({idx}/{len(contacts)}) Drafting for {contact.name} ({contact.email})...[/cyan]")
+            prompt = build_draft_prompt(contact, profile)
+
+            success = False
+            last_err = ""
+
+            # Attempt initial generation + 1 retry
+            for attempt in range(1, 3):
+                try:
+                    current_prompt = prompt
+                    if attempt == 2:
+                        console.print(f"  [yellow]↳ Retrying generation for {contact.name} (attempt 2/2)...[/yellow]")
+                        current_prompt += (
+                            f"\nIMPORTANT PREVIOUS ATTEMPT FAILED: {last_err}. "
+                            "Please strictly adhere to the instructions: output MUST contain SUBJECT and BODY, "
+                            "body MUST be under 130 words, and MUST NOT contain any links/URLs."
+                        )
+
+                    raw_output = llm.generate(current_prompt)
+                    is_valid, subject, body, err = parse_and_validate_draft(raw_output)
+
+                    if is_valid:
+                        contact.draft_subject = subject
+                        contact.draft_body = body
+                        contact.status = ContactStatus.DRAFTED
+                        drafted_count += 1
+                        success = True
+                        console.print(f"  [green]✓ Drafted successfully ({len(body.split())} words)[/green]")
+                        break
+                    else:
+                        last_err = err
+                        console.print(f"  [yellow]⚠ Validation failure (attempt {attempt}): {err}[/yellow]")
+                except LLMError as e:
+                    last_err = f"LLM error: {e}"
+                    console.print(f"  [red]⚠ LLM Error (attempt {attempt}): {e}[/red]")
+
+            if not success:
+                contact.status = ContactStatus.DRAFT_FAILED
+                failed_count += 1
+                console.print(f"  [red]✗ Failed to draft after 2 attempts. Marked as 'draft_failed'. Reason: {last_err}[/red]")
+
+        session.commit()
+
+    # Final summary table
+    table = Table(title="Draft Generation Summary")
+    table.add_column("Result", style="cyan")
+    table.add_column("Count", style="bold")
+    table.add_row("Total Processed", str(len(contacts)))
+    table.add_row("Drafted (Ready for Review)", f"[green]{drafted_count}[/green]")
+    table.add_row("Draft Failed", f"[red]{failed_count}[/red]")
+    console.print("\n", table)
+
+
+@app.command("export-drafts")
+def export_drafts(
+    output_file: Path = typer.Option(
+        Path("drafts_review.csv"),
+        "--output",
+        "-o",
+        help="Destination CSV file path."
+    ),
+    include_all_drafted: bool = typer.Option(
+        False,
+        "--all",
+        help="Include all drafted contacts even if previously reviewed."
+    )
+):
+    """
+    Export all drafted contacts to drafts_review.csv for manual inspection and approval.
+    """
+    with get_session() as session:
+        contacts = (
+            session.query(Contact)
+            .filter(Contact.status == ContactStatus.DRAFTED)
+            .order_by(Contact.id)
+            .all()
+        )
+
+        if not contacts:
+            console.print("[yellow]No contacts currently have status 'drafted'. Nothing to export.[/yellow]")
+            return
+
+        fieldnames = [
+            "id",
+            "name",
+            "email",
+            "organization",
+            "role",
+            "type",
+            "research_area_or_team",
+            "status",
+            "draft_subject",
+            "draft_body"
+        ]
+
+        with open(output_file, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for c in contacts:
+                writer.writerow({
+                    "id": c.id,
+                    "name": c.name,
+                    "email": c.email,
+                    "organization": c.organization or "",
+                    "role": c.role or "",
+                    "type": c.type.value if hasattr(c.type, "value") else str(c.type),
+                    "research_area_or_team": c.research_area_or_team or "",
+                    "status": c.status.value if hasattr(c.status, "value") else str(c.status),
+                    "draft_subject": c.draft_subject or "",
+                    "draft_body": c.draft_body or ""
+                })
+
+        console.print(f"[bold green]✓ Successfully exported {len(contacts)} drafted contacts to:[/bold green] [cyan]{output_file}[/cyan]")
 
 
 if __name__ == "__main__":

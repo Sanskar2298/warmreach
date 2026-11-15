@@ -23,6 +23,7 @@ class ContactType(str, enum.Enum):
 class ContactStatus(str, enum.Enum):
     NEW = "new"
     DRAFTED = "drafted"
+    DRAFT_FAILED = "draft_failed"
     APPROVED = "approved"
     SENT = "sent"
     REPLIED = "replied"

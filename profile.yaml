@@ -1,0 +1,15 @@
+name: "Sanskar"
+degree: "B.Tech in Computer Science and Engineering"
+skills:
+  - "Python"
+  - "FastAPI"
+  - "SQLAlchemy"
+  - "PyTorch"
+  - "Distributed Systems"
+  - "Machine Learning"
+projects:
+  - name: "Warmreach (intern-outreach)"
+    description: "An automated, approval-gated CLI tool for personalized academic & industry outreach with rate limiting and safety controls."
+  - name: "Autonomous Agent Evaluator"
+    description: "Framework benchmarking multi-step LLM reasoning accuracy and tool orchestration."
+internship_goal: "Summer 2025 Research / Software Engineering Internship focused on AI Systems, Machine Learning Infrastructure, or Robotics."

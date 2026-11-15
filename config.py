@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 4
     LLM_BACKOFF_FACTOR: float = 2.0
 
+    # Gmail OAuth Settings
+    GMAIL_CLIENT_SECRET_FILE: str = "credentials.json"
+    GMAIL_TOKEN_FILE: str = "token.json"
+
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),
         env_file_encoding="utf-8",

@@ -4,13 +4,20 @@ from typing import Optional
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.panel import Panel
 
+from config import settings
 from database import init_db, get_session
 from models import Contact, ContactStatus
 from importer import import_contacts_from_csv
 from llm import get_llm_client, LLMError
 from drafter import load_profile, build_draft_prompt, parse_and_validate_draft, PROFILE_PATH
-from reviewer import review_loop
+from reviewer import review_loop, get_contacts_eligible_for_sending
+from sender import (
+    process_sending_batch,
+    get_calendar_day_send_count,
+    get_gmail_service
+)
 
 app = typer.Typer(
     name="intern-outreach",
@@ -47,7 +54,6 @@ def import_contacts(
     with get_session() as session:
         result = import_contacts_from_csv(csv_file, session)
 
-    # Summary table
     table = Table(title="Contacts Import Summary")
     table.add_column("Metric", style="cyan")
     table.add_column("Count", style="bold")
@@ -58,13 +64,11 @@ def import_contacts(
     table.add_row("Skipped (Invalid/Errors)", f"[red]{len(result.skipped_invalid)}[/red]")
     console.print(table)
 
-    # Details on skipped duplicates
     if result.skipped_duplicate:
         console.print("\n[yellow bold]Skipped Duplicates:[/yellow bold]")
         for row_num, email, reason in result.skipped_duplicate:
             console.print(f"  • Row {row_num} [bold]{email}[/bold]: {reason}")
 
-    # Details on invalid entries
     if result.skipped_invalid:
         console.print("\n[red bold]Skipped Invalid Entries:[/red bold]")
         for row_num, identifier, reason in result.skipped_invalid:
@@ -237,6 +241,110 @@ def review(
 
         console.print(f"[bold blue]Starting review for {len(contacts)} drafted emails...[/bold blue]")
         review_loop(session, contacts)
+
+
+@app.command("send")
+def send(
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Explicit confirmation required to perform real email transmission."
+    ),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Maximum number of approved emails to process in this run."
+    )
+):
+    """
+    Send approved cold outreach emails via Gmail API.
+    Dry-run mode is enabled by default. To perform real sending:
+      1. Set DRY_RUN=false in .env
+      2. Pass the --confirm flag
+    Safety limits enforced:
+      • Max 30 sends per calendar day (counted from DB)
+      • 60-180 second randomized delay between sends
+      • Abort immediately on any API transmission error
+    """
+    # Safety Check: Determine if live sending is authorized
+    is_live_send = (settings.DRY_RUN is False) and (confirm is True)
+
+    with get_session() as session:
+        # Check current calendar day sends from DB
+        today_sends = get_calendar_day_send_count(session)
+        remaining_cap = max(0, settings.DAILY_EMAIL_CAP - today_sends)
+
+        console.print(f"[bold blue]Daily Sending Status:[/bold blue] {today_sends}/{settings.DAILY_EMAIL_CAP} used today. Remaining: {remaining_cap}")
+
+        if remaining_cap <= 0:
+            console.print("[bold red]Daily cap reached for today! No more emails can be sent until tomorrow.[/bold red]")
+            return
+
+        query = (
+            session.query(Contact)
+            .filter(Contact.status == ContactStatus.APPROVED)
+            .order_by(Contact.id)
+        )
+        if limit is not None and limit > 0:
+            query = query.limit(limit)
+
+        approved_contacts = query.all()
+
+        if not approved_contacts:
+            console.print("[yellow]No contacts found with status 'approved'. Nothing to send.[/yellow]")
+            return
+
+        if not is_live_send:
+            console.print("\n[bold yellow]═══ RUNNING IN DRY-RUN MODE ═══[/bold yellow]")
+            if settings.DRY_RUN:
+                console.print("[dim]DRY_RUN is true in settings/.env.[/dim]")
+            if not confirm:
+                console.print("[dim]--confirm flag was not passed.[/dim]")
+            console.print("[yellow]No real emails will be sent. Showing previews below:[/yellow]\n")
+
+            for idx, c in enumerate(approved_contacts, start=1):
+                panel_text = (
+                    f"[bold cyan]To:[/bold cyan] {c.name} <{c.email}>\n"
+                    f"[bold cyan]Subject:[/bold cyan] {c.draft_subject}\n\n"
+                    f"[bold white]Body:[/bold white]\n{c.draft_body}"
+                )
+                console.print(Panel(panel_text, title=f"Dry-Run Preview ({idx}/{len(approved_contacts)})", border_style="yellow"))
+
+            sent_count, skipped_cap, _ = process_sending_batch(
+                session, approved_contacts, dry_run=True
+            )
+            console.print(f"\n[bold green]✓ Dry-run completed for {sent_count} approved emails.[/bold green]")
+            return
+
+        # LIVE SENDING
+        console.print(f"\n[bold red]⚠️  LIVE SENDING MODE ACTIVATED ⚠️[/bold red]")
+        console.print(f"Preparing to send up to {len(approved_contacts)} approved emails via Gmail API...\n")
+
+        try:
+            gmail_service = get_gmail_service()
+        except Exception as e:
+            console.print(f"[bold red]Failed to initialize Gmail API service:[/bold red] {e}")
+            raise typer.Exit(code=1)
+
+        sent_count, skipped_cap, err_message = process_sending_batch(
+            session=session,
+            approved_contacts=approved_contacts,
+            dry_run=False,
+            gmail_service=gmail_service
+        )
+
+        table = Table(title="Live Send Results")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Count", style="bold")
+        table.add_row("Successfully Sent", f"[green]{sent_count}[/green]")
+        table.add_row("Skipped (Cap Reached)", f"[yellow]{skipped_cap}[/yellow]")
+        console.print(table)
+
+        if err_message:
+            console.print(f"\n[bold red]Halted:[/bold red] {err_message}")
+        else:
+            console.print("\n[bold green]✓ All selected approved emails sent successfully.[/bold green]")
 
 
 @app.command("export-drafts")

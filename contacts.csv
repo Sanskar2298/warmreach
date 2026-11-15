@@ -1,0 +1,6 @@
+name,email,organization,role,type,research_area_or_team,notes,source_url
+Alice Smith,alice.smith@example.com,TechCorp Global,University Recruiting Lead,hr,Early Career Talent,Prefers candidates with open source work,https://example.com/careers/techcorp
+Dr. Robert Chen,robert.chen@example.com,Stanford AI Institute,Professor of Computer Science,professor,Reinforcement Learning & Robotics,Published recent paper on hierarchical policy learning,https://example.com/faculty/rchen
+Elena Rostova,elena.rostova@example.com,DeepCompute Labs,Head of Technical Staffing,hr,Systems & AI Infrastructure,Hiring for summer/fall research interns,https://example.com/jobs/deepcompute
+Dr. Maya Patel,maya.patel@example.com,Quantum Algorithms Lab,Associate Professor,professor,Quantum Error Correction & Algorithms,Currently accepting undergraduate/graduate researchers,https://example.com/faculty/mpatel
+Marcus Vance,marcus.vance@example.com,NextGen Robotics,Talent Acquisition Partner,hr,Perception & Autonomous Driving,Reached out on LinkedIn previously,https://example.com/careers/nextgen

@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import csv
 from pathlib import Path
 from typing import Optional
@@ -11,7 +12,14 @@ from database import init_db, get_session
 from models import Contact, ContactStatus
 from importer import import_contacts_from_csv
 from llm import get_llm_client, LLMError
-from drafter import load_profile, build_draft_prompt, parse_and_validate_draft, PROFILE_PATH
+from drafter import (
+    load_profile,
+    build_draft_prompt,
+    parse_and_validate_draft,
+    build_followup_prompt,
+    parse_and_validate_followup,
+    PROFILE_PATH
+)
 from reviewer import review_loop, get_contacts_eligible_for_sending
 from sender import (
     process_sending_batch,
@@ -348,6 +356,196 @@ def send(
             console.print(f"\n[bold red]Halted:[/bold red] {err_message}")
         else:
             console.print("\n[bold green]✓ All selected approved emails sent successfully.[/bold green]")
+
+
+@app.command("mark")
+def mark_status(
+    email: str = typer.Argument(..., help="Email of the contact to update."),
+    status: str = typer.Argument(
+        ...,
+        help="New status for the contact. Must be: replied, bounced, or do_not_contact."
+    )
+):
+    """
+    Manually mark a contact's status as replied, bounced, or do_not_contact.
+    Contacts with these statuses are globally blocked from any future sending.
+    """
+    normalized_status = status.strip().lower()
+    valid_map = {
+        "replied": ContactStatus.REPLIED,
+        "bounced": ContactStatus.BOUNCED,
+        "do_not_contact": ContactStatus.DO_NOT_CONTACT,
+    }
+
+    if normalized_status not in valid_map:
+        console.print(
+            f"[bold red]Invalid status '{status}'.[/bold red] Must be one of: "
+            f"{', '.join(valid_map.keys())}"
+        )
+        raise typer.Exit(code=1)
+
+    target_status = valid_map[normalized_status]
+    normalized_email = email.strip().lower()
+
+    with get_session() as session:
+        contact = (
+            session.query(Contact)
+            .filter(Contact.email == normalized_email)
+            .first()
+        )
+        if not contact:
+            console.print(f"[bold red]No contact found with email:[/bold red] {normalized_email}")
+            raise typer.Exit(code=1)
+
+        old_status = contact.status.value
+        contact.status = target_status
+        session.commit()
+
+        console.print(
+            f"[bold green]✓ Updated status for {contact.name} ({contact.email}):[/bold green] "
+            f"[yellow]{old_status}[/yellow] ➔ [bold cyan]{target_status.value}[/bold cyan]"
+        )
+
+
+@app.command("followups")
+def generate_followups(
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Maximum number of follow-ups to generate in this run."
+    ),
+    days: int = typer.Option(
+        7,
+        "--days",
+        "-d",
+        help="Minimum number of days elapsed since original send to qualify for follow-up (default 7)."
+    ),
+    profile_file: Path = typer.Option(
+        PROFILE_PATH,
+        "--profile",
+        "-p",
+        help="Path to the applicant profile YAML file."
+    )
+):
+    """
+    Find contacts with status 'sent' for 7+ days, no reply, and no follow-up sent yet.
+    Generates a concise follow-up draft (strictly under 60 words, no links),
+    and updates their status to 'drafted' so they enter the standard review and send flow.
+    Enforces that each contact receives at most one follow-up.
+    """
+    try:
+        profile = load_profile(profile_file)
+    except Exception as e:
+        console.print(f"[bold red]Failed to load profile:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    try:
+        llm = get_llm_client()
+    except Exception as e:
+        console.print(f"[bold red]Failed to initialize LLM client:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    cutoff_date = datetime.now() - timedelta(days=days)
+
+    with get_session() as session:
+        query = (
+            session.query(Contact)
+            .filter(
+                Contact.status == ContactStatus.SENT,
+                Contact.sent_at <= cutoff_date,
+                Contact.followup_sent_at.is_(None)
+            )
+            .order_by(Contact.sent_at.asc())
+        )
+        if limit is not None and limit > 0:
+            query = query.limit(limit)
+
+        eligible_contacts = query.all()
+
+        if not eligible_contacts:
+            console.print(
+                f"[yellow]No contacts found with status 'sent' older than {days} days "
+                "without follow-up. Nothing to generate.[/yellow]"
+            )
+            return
+
+        console.print(
+            f"[bold blue]Found {len(eligible_contacts)} contacts eligible for follow-up "
+            f"(sent >= {days} days ago, no reply, no previous follow-up).[/bold blue]\n"
+        )
+
+        drafted_count = 0
+        failed_count = 0
+
+        for idx, contact in enumerate(eligible_contacts, start=1):
+            console.print(
+                f"[cyan]({idx}/{len(eligible_contacts)}) Generating follow-up for "
+                f"{contact.name} ({contact.email})...[/cyan]"
+            )
+            prompt = build_followup_prompt(contact, profile)
+
+            success = False
+            last_err = ""
+
+            for attempt in range(1, 3):
+                try:
+                    current_prompt = prompt
+                    if attempt == 2:
+                        console.print(f"  [yellow]↳ Retrying follow-up generation (attempt 2/2)...[/yellow]")
+                        current_prompt += (
+                            f"\nIMPORTANT PREVIOUS ATTEMPT FAILED: {last_err}. "
+                            "Please strictly adhere to: output MUST contain SUBJECT and BODY, "
+                            "body MUST be under 60 words, and MUST NOT contain any links/URLs."
+                        )
+
+                    raw_output = llm.generate(current_prompt)
+                    suggested_sub = (
+                        contact.draft_subject
+                        if (contact.draft_subject and contact.draft_subject.lower().startswith("re:"))
+                        else f"Re: {contact.draft_subject or 'Internship Inquiry'}"
+                    )
+                    is_valid, subject, body, err = parse_and_validate_followup(
+                        raw_output, default_subject=suggested_sub
+                    )
+
+                    if is_valid:
+                        contact.draft_subject = subject
+                        contact.draft_body = body
+                        contact.status = ContactStatus.DRAFTED
+                        drafted_count += 1
+                        success = True
+                        console.print(
+                            f"  [green]✓ Follow-up drafted successfully ({len(body.split())} words). "
+                            "Marked as 'drafted' for review.[/green]"
+                        )
+                        break
+                    else:
+                        last_err = err
+                        console.print(f"  [yellow]⚠ Validation failure (attempt {attempt}): {err}[/yellow]")
+                except LLMError as e:
+                    last_err = f"LLM error: {e}"
+                    console.print(f"  [red]⚠ LLM Error (attempt {attempt}): {e}[/red]")
+
+            if not success:
+                failed_count += 1
+                console.print(
+                    f"  [red]✗ Failed to draft follow-up after 2 attempts for {contact.name}: {last_err}[/red]"
+                )
+
+        session.commit()
+
+    table = Table(title="Follow-ups Generation Summary")
+    table.add_column("Result", style="cyan")
+    table.add_column("Count", style="bold")
+    table.add_row("Total Eligible Contacts", str(len(eligible_contacts)))
+    table.add_row("Drafted & Queued for Review", f"[green]{drafted_count}[/green]")
+    table.add_row("Failed", f"[red]{failed_count}[/red]")
+    console.print("\n", table)
+    console.print(
+        "\n[bold green]Tip:[/bold green] Run [cyan]python cli.py review[/cyan] to inspect and approve "
+        "these follow-ups before sending!"
+    )
 
 
 @app.command("export-drafts")

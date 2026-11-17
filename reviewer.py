@@ -17,8 +17,10 @@ def get_contacts_eligible_for_sending(contacts_iterable):
     """
     Core safety invariant rule:
     Only contacts with status == 'approved' can ever be sent.
+    Any contacts with blocked status (replied, bounced, do_not_contact) are strictly rejected.
     """
-    return [c for c in contacts_iterable if c.status == ContactStatus.APPROVED]
+    blocked = {ContactStatus.REPLIED, ContactStatus.BOUNCED, ContactStatus.DO_NOT_CONTACT}
+    return [c for c in contacts_iterable if c.status == ContactStatus.APPROVED and c.status not in blocked]
 
 
 def display_review_card(contact: Contact, current_idx: int, total_count: int) -> None:

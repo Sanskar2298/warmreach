@@ -6,41 +6,47 @@ A personal, approval-gated CLI tool that drafts personalized internship cold out
 
 ## Global Rules & Safety Architecture
 - **Dry-run by default**: No real emails will ever be sent unless dry-run mode is explicitly disabled (`DRY_RUN=false` in `.env`) **AND** the `--confirm` CLI flag is passed.
-- **Strict Approval Gate**: **ONLY** contacts with status `approved` can ever be sent. All other statuses (`new`, `drafted`, `draft_failed`, `sent`, `do_not_contact`, `bounced`) are strictly excluded.
+- **Strict Approval Gate**: **ONLY** contacts with status `approved` can ever be sent.
+- **Global Inviolable Block**: Contacts marked `replied`, `bounced`, or `do_not_contact` are permanently and globally blocked from all sending pipelines.
+- **Single Follow-Up Rule**: Exactly at most **one** follow-up can ever be sent per contact, gated by status `sent` for 7+ days with no reply and `followup_sent_at is None`. Follow-ups must pass standard review and approval.
 - **Zero-Risk Credentials**: All passwords, API keys, and credential files are strictly ignored in `.gitignore`.
 - **Daily Rate Cap**: Hard limit of 30 sends per calendar day (counted dynamically from the database).
 - **Anti-Spam Throttling**: 60–180 second randomized delay between consecutive live sends.
 - **Fail-Safe Abort**: Immediately aborts batch transmission on any error to protect sender reputation.
-- **Validation Guardrails**: Output must strictly adhere to `SUBJECT:` and `BODY:` formats, be strictly under 130 words, and contain zero hyperlinks/URLs.
+- **Validation Guardrails**:
+  - Initial drafts: `<130 words`, no links, `SUBJECT:` + `BODY:`.
+  - Follow-up drafts: `<60 words`, no links, `SUBJECT:` + `BODY:`.
 
 ---
 
-## Sending Methods: Choose What Works Best
+## Project Structure
 
-You have two easy ways to send emails. **Method 1 (Gmail App Password) is recommended** because it takes 1 minute and requires zero Google Cloud or credit card setup:
-
-### Method 1: Gmail App Password (Easiest & Free - Recommended)
-1. Go to your Google Account App Passwords page: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
-   *(Make sure 2-Step Verification is turned on in your Google account security settings).*
-2. Name the app `intern-outreach` and click **Create**.
-3. Google will give you a 16-character password (e.g. `abcd efgh ijkl mnop`).
-4. In your `.env` file, set:
-   ```env
-   EMAIL_SEND_METHOD=smtp
-   SENDER_EMAIL=your_email@gmail.com
-   SENDER_APP_PASSWORD=abcdefghijklmnop
-   ```
-
-### Method 2: Google Cloud OAuth (`credentials.json`)
-If you prefer official Google Cloud OAuth:
-1. Go to [Google Cloud Console](https://console.cloud.google.com/) and create a project.
-2. Enable the **Gmail API**.
-3. Configure the **OAuth Consent Screen** (External, add scope `https://www.googleapis.com/auth/gmail.send`, add yourself as test user).
-4. Create an **OAuth Client ID** for **Desktop App**, download it as `credentials.json`, and place it in this project folder.
-5. In your `.env` file, set:
-   ```env
-   EMAIL_SEND_METHOD=oauth
-   ```
+```text
+.
+├── config.py             # App configuration & settings (pydantic-settings)
+├── database.py           # SQLite connection & database session management
+├── models.py             # SQLAlchemy models (Contact, StatusEnum, ContactTypeEnum)
+├── importer.py           # CSV contact import & validation logic
+├── llm.py                # LLM client abstractions (GeminiClient, OllamaClient)
+├── drafter.py            # Draft & follow-up prompt builders, parsers & length validators
+├── reviewer.py           # Interactive terminal review loop & approval gatekeeper
+├── sender.py             # Dispatcher (SMTP/OAuth), global block check, daily cap & pacing
+├── cli.py                # Typer CLI application entry point
+├── profile.yaml          # User profile configuration (name, degree, skills, projects, goal)
+├── contacts.csv          # Sample CSV template with mock contacts
+├── requirements.txt      # Python dependencies
+├── .env.example          # Environment variables template
+├── .gitignore            # Git exclusion rules
+├── tests/                # Unit & integration test suite
+│   ├── __init__.py
+│   ├── test_contacts.py  # Email validation and duplicate handling tests
+│   ├── test_llm.py       # Mocked tests for LLM client, retries, and pacing
+│   ├── test_drafts.py    # Tests for draft generation, validation, and retry logic
+│   ├── test_review.py    # Tests for interactive review actions and sending safety gate
+│   ├── test_sender.py    # Tests for daily cap enforcement, dry-run, and live send logic
+│   └── test_followups.py # Tests for follow-up qualification, 60-word cap, and global status blocking
+└── README.md             # Documentation and testing instructions
+```
 
 ---
 
@@ -75,65 +81,76 @@ copy .env.example .env
 # Linux / macOS
 cp .env.example .env
 ```
-Open `.env` and set:
+Configure your `.env`:
 - `LLM_PROVIDER`: `gemini` (free from [Google AI Studio](https://aistudio.google.com/app/apikey)) or `ollama`.
 - `GEMINI_API_KEY`: Your Gemini key.
-- `EMAIL_SEND_METHOD`: `smtp` (recommended) or `oauth`.
+- `EMAIL_SEND_METHOD`: `smtp` (easiest via [Google App Password](https://myaccount.google.com/apppasswords)) or `oauth`.
 - `DRY_RUN`: Defaults to `true` for maximum safety.
 
 ---
 
 ## Commands & Usage Workflow
 
-### Step 1: Import Contacts
-Import contacts from CSV into the local SQLite database:
+### 1. Import Contacts
+Import contacts from CSV into SQLite:
 ```bash
 python cli.py import-contacts contacts.csv
 ```
 
-### Step 2: Test LLM Connectivity
-Test the connectivity of your LLM provider:
+### 2. Test LLM Connectivity
 ```bash
 python cli.py test-llm "say hello"
 ```
 
-### Step 3: Generate Drafts
-Draft personalized emails for contacts with status `new`:
+### 3. Generate Initial Drafts
+Draft personalized emails for contacts with status `new` (<130 words, no links):
 ```bash
-python cli.py generate-drafts --limit 2
+python cli.py generate-drafts --limit 5
 ```
 
-### Step 4: Review and Approve Drafts
+### 4. Review and Approve Drafts
 Interactively review, edit, approve, or reject drafts in the terminal:
 ```bash
 python cli.py review
 ```
 Keybindings in review mode:
-- `a`: **Approve** (marks status as `approved` — the only state eligible for sending).
+- `a`: **Approve** (marks status as `approved` — only state eligible for sending).
 - `e`: **Edit** (opens draft in editor or interactive prompts, then re-displays for approval).
 - `s`: **Skip** (leaves as `drafted` to decide later).
 - `d`: **Do Not Contact** (marks status as `do_not_contact`).
 - `q`: **Quit & Save** (commits all progress and exits).
 
-### Step 5: Send Approved Emails
+### 5. Send Approved Emails
+- **Dry-run mode (default)**:
+  ```bash
+  python cli.py send
+  ```
+- **Real live send mode** (requires `DRY_RUN=false` in `.env` AND `--confirm` flag):
+  ```bash
+  python cli.py send --confirm
+  ```
 
-#### Dry-Run Mode (Default):
-Test without sending any real emails. Prints all headers and body previews:
+### 6. Manage Contact Status
+Update status for contacts who responded, bounced, or should not be contacted again:
 ```bash
-python cli.py send
+python cli.py mark user@example.com replied
+python cli.py mark bad@example.com bounced
+python cli.py mark unsubscribe@example.com do_not_contact
 ```
+*(Any contact with status `replied`, `bounced`, or `do_not_contact` is globally blocked by the sender).*
 
-#### Real Live Send Mode:
-Only executes if `DRY_RUN=false` in `.env` **AND** `--confirm` is provided:
+### 7. Automated Follow-Ups (7+ Days, Max 1 Follow-up)
+Find contacts sent 7+ days ago with no reply and no previous follow-up. Generates a polite, short follow-up (<60 words, no links) and moves them to `drafted`:
 ```bash
-python cli.py send --confirm
+python cli.py followups
 ```
+After drafting follow-ups, simply run `python cli.py review` to approve and `python cli.py send` to dispatch!
 
 ---
 
 ## Running Tests
 
-Run the complete test suite (34 unit, safety, and integration tests):
+Run the complete test suite (41 unit, safety, and integration tests):
 ```bash
 pytest -v
 ```

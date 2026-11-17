@@ -119,3 +119,84 @@ def parse_and_validate_draft(raw_text: str) -> Tuple[bool, Optional[str], Option
         return False, subject, body, f"Body length ({word_count} words) exceeds limit of 130 words"
 
     return True, subject, body, None
+
+
+FOLLOWUP_SYSTEM_INSTRUCTIONS = """You are an expert at drafting polite, very short follow-up emails for internship inquiries.
+Follow these strict guidelines:
+1. The tone must be polite, concise, and respectful of their busy schedule.
+2. DO NOT include any hyperlinks, URLs, markdown links, or brackets like [link].
+3. The body MUST be under 60 words.
+4. Reference the previous message briefly without repeating the whole pitch.
+5. Output EXACTLY in this format with no other commentary:
+SUBJECT: <Subject Line>
+BODY:
+<Body text>"""
+
+def build_followup_prompt(contact: Any, profile: Dict[str, Any]) -> str:
+    """Build the prompt for cold email follow-up."""
+    contact_name = getattr(contact, "name", "Contact")
+    contact_org = getattr(contact, "organization", "Organization") or "Organization"
+    previous_subject = getattr(contact, "draft_subject", "") or "Internship Inquiry"
+    user_name = profile.get("name", "Applicant")
+
+    # Ensure subject has Re: or appropriate follow-up prefix
+    suggested_subject = previous_subject if previous_subject.lower().startswith("re:") else f"Re: {previous_subject}"
+
+    prompt = f"""{FOLLOWUP_SYSTEM_INSTRUCTIONS}
+
+Applicant Name: {user_name}
+Recipient Name: {contact_name}
+Organization: {contact_org}
+Original Subject: {suggested_subject}
+
+Draft a brief, polite follow-up checking in on the previous note.
+Keep the email body strictly under 60 words.
+Do NOT include any links or URLs.
+
+Format:
+SUBJECT: {suggested_subject}
+BODY:
+<Body text>
+"""
+    return prompt
+
+def parse_and_validate_followup(raw_text: str, default_subject: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+    """
+    Validates that:
+    1. Output contains SUBJECT and BODY sections (or uses default subject if specified).
+    2. Body is under 60 words.
+    3. Contains no links / URLs.
+    
+    Returns (is_valid, subject, body, error_message)
+    """
+    if not raw_text or not raw_text.strip():
+        return False, None, None, "Raw LLM output is empty"
+
+    subject_match = re.search(r"^SUBJECT:\s*(.*?)(?=\nBODY:|\r\nBODY:|\Z)", raw_text, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+    body_match = re.search(r"BODY:\s*(.*)", raw_text, re.IGNORECASE | re.DOTALL)
+
+    if not body_match:
+        return False, None, None, "Output missing 'BODY:' delimiter"
+
+    if subject_match:
+        subject = subject_match.group(1).strip()
+        subject = " ".join(subject.split())
+    else:
+        subject = default_subject or "Follow-up regarding internship inquiry"
+
+    body = body_match.group(1).strip()
+
+    if not subject:
+        return False, None, None, "Parsed subject is empty"
+    if not body:
+        return False, None, None, "Parsed body is empty"
+
+    link_pattern = re.compile(r"(https?://\S+|www\.\S+|\[.*?\]\(.*?\))", re.IGNORECASE)
+    if link_pattern.search(subject) or link_pattern.search(body):
+        return False, subject, body, "Follow-up contains URLs or markdown links, which are forbidden"
+
+    word_count = len(body.split())
+    if word_count > 60:
+        return False, subject, body, f"Follow-up body length ({word_count} words) exceeds limit of 60 words"
+
+    return True, subject, body, None

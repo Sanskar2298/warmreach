@@ -25,6 +25,24 @@ class EmailSendError(Exception):
     pass
 
 
+# Blocked statuses that MUST NEVER receive any email under any circumstance
+BLOCKED_STATUSES = {
+    ContactStatus.REPLIED,
+    ContactStatus.BOUNCED,
+    ContactStatus.DO_NOT_CONTACT
+}
+
+
+class BlockedContactError(Exception):
+    """Raised when an attempt is made to send to a blocked/terminal status contact."""
+    pass
+
+
+def is_contact_blocked(status: ContactStatus) -> bool:
+    """Returns True if the contact status is blocked from receiving emails."""
+    return status in BLOCKED_STATUSES
+
+
 class DailyCapExceededError(Exception):
     """Exception raised when daily sending limit is reached."""
     pass
@@ -168,7 +186,14 @@ def process_sending_batch(
     err_message = None
 
     for idx, contact in enumerate(approved_contacts):
-        # Double check invariant
+        # Global safety check: block contacts with replied, bounced, or do_not_contact
+        if is_contact_blocked(contact.status):
+            logger.warning(
+                f"Global sender block triggered: Contact {contact.email} has blocked status '{contact.status.value}'. Skipping."
+            )
+            continue
+
+        # Invariant: only APPROVED contacts can ever be sent
         if contact.status != ContactStatus.APPROVED:
             continue
 
@@ -194,7 +219,12 @@ def process_sending_batch(
             # LIVE SEND MODE
             try:
                 dispatch_email(contact.email, subject, body, gmail_service=gmail_service)
-                contact.sent_at = datetime.now()
+                now = datetime.now()
+                # If this was a follow-up send, record followup_sent_at
+                if contact.sent_at is not None:
+                    contact.followup_sent_at = now
+                else:
+                    contact.sent_at = now
                 contact.status = ContactStatus.SENT
                 session.commit()
                 sent_in_batch += 1

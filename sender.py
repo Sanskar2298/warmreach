@@ -50,23 +50,36 @@ class DailyCapExceededError(Exception):
 
 def get_calendar_day_send_count(session: Session, target_date: Optional[date] = None) -> int:
     """
-    Counts how many emails were sent on the given calendar day (defaults to today)
-    directly queried from the SQLite database.
+    Counts how many emails (initial sends + follow-up sends) were sent on the given
+    calendar day (defaults to today) directly queried from the SQLite database.
     """
     day = target_date or datetime.now().date()
     start_of_day = datetime.combine(day, datetime.min.time())
     end_of_day = datetime.combine(day, datetime.max.time())
 
-    count = (
+    # Initial sends today
+    initial_sends = (
         session.query(func.count(Contact.id))
         .filter(
-            Contact.status == ContactStatus.SENT,
             Contact.sent_at >= start_of_day,
             Contact.sent_at <= end_of_day
         )
         .scalar()
-    )
-    return count or 0
+    ) or 0
+
+    # Follow-up sends today (where sent_at occurred previously, but followup_sent_at is today)
+    followup_sends = (
+        session.query(func.count(Contact.id))
+        .filter(
+            Contact.followup_sent_at >= start_of_day,
+            Contact.followup_sent_at <= end_of_day,
+            # Avoid double-counting if both were somehow marked today
+            (Contact.sent_at < start_of_day) | (Contact.sent_at > end_of_day) | (Contact.sent_at.is_(None))
+        )
+        .scalar()
+    ) or 0
+
+    return initial_sends + followup_sends
 
 
 def build_email_message(to_email: str, subject: str, body: str, from_email: Optional[str] = None) -> EmailMessage:
